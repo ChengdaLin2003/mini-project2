@@ -1,0 +1,3 @@
+(library (name interp2))
+(menhir (modules parser))
+(ocamllex lexer)
