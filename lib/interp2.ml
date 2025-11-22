@@ -28,6 +28,11 @@ type error = Utils.error =
   | LetRecErr of string
   | AssertTyErr of ty
 
+type bop = Utils.bop =
+  | Add | Sub | Mul | Div | Mod
+  | Lt | Lte | Gt | Gte | Eq | Neq
+  | And | Or
+
 type sfexpr = Utils.sfexpr =
   | SUnit
   | SBool of bool
@@ -58,6 +63,7 @@ type toplet = Utils.toplet =
     ty : ty;
     binding : sfexpr;
   }
+
 type prog = Utils.prog
 
 type expr = Utils.expr =
@@ -134,8 +140,8 @@ let rec fun_ty_of_args (args : (string * ty) list) (ret_ty : ty) : ty =
 let rec curry_fun (args : (string * ty) list) (body_e : expr) : expr =
   match args with
   | [] -> body_e
-  | (x, t) :: tl ->
-      Fun (x, t, curry_fun tl body_e)
+  | (x, ty) :: tl ->
+      Fun (x, ty, curry_fun tl body_e)
 
 (******************************************************************
  * Helper: 把 f a1 a2 a3 ... 左结合成 ((f a1) a2) a3 ...
@@ -144,8 +150,7 @@ let rec curry_fun (args : (string * ty) list) (body_e : expr) : expr =
 let rec chain_app (f : expr) (args : expr list) : expr =
   match args with
   | [] -> f
-  | a :: tl ->
-      chain_app (App (f, a)) tl
+  | a :: tl -> chain_app (App (f, a)) tl
 
 (******************************************************************
  * desugar_sf : sfexpr -> expr
@@ -222,7 +227,9 @@ type ty_env = ty Env.t
 let empty_env : ty_env = Env.empty
 
 let lookup (env : ty_env) (x : string) : (ty, error) result =
-  try Ok (Env.find x env) with Not_found -> Error (UnknownVar x)
+  match Env.find_opt x env with
+  | Some t -> Ok t
+  | None -> Error (UnknownVar x)
 
 let rec type_of_with (env : ty_env) (e : expr) : (ty, error) result =
   match e with
@@ -241,7 +248,8 @@ let rec type_of_with (env : ty_env) (e : expr) : (ty, error) result =
               match type_of_with env t, type_of_with env f with
               | Error e, _ | _, Error e -> Error e
               | Ok tt, Ok tf ->
-                  if tt = tf then Ok tt else Error (IfTyErr (tt, tf))
+                  if tt = tf then Ok tt
+                  else Error (IfTyErr (tt, tf))
       end
 
   | Bop (op, e1, e2) ->
@@ -339,8 +347,145 @@ let rec type_of_with (env : ty_env) (e : expr) : (ty, error) result =
 let type_of (e : expr) : (ty, error) result =
   type_of_with empty_env e
 
-let eval (_e : expr) : value =
-  failwith "eval: TODO"
+(* -------------------- Evaluation -------------------- *)
 
-let interp (_s : string) : (value, error) result =
-  Error ParseErr
+(* Extract an int from a value. Well-typed programs guarantee
+   that these helpers are only called on the right kind of value. *)
+let int_of_value (v : value) : int =
+  match v with
+  | VNum n -> n
+  | _ -> failwith "internal error: expected int"
+
+let bool_of_value (v : value) : bool =
+  match v with
+  | VBool b -> b
+  | _ -> failwith "internal error: expected bool"
+
+(* Big-step evaluator with an explicit dynamic environment. *)
+let rec eval_with (env : dyn_env) (e : expr) : value =
+  match e with
+  | Unit -> VUnit
+  | Bool b -> VBool b
+  | Num n -> VNum n
+  | Var x ->
+      (* In well-typed programs every variable must be bound. *)
+      (try Env.find x env with Not_found ->
+         failwith ("internal error: unbound variable " ^ x))
+
+  | If (c, t, f) ->
+      let vc = eval_with env c in
+      if bool_of_value vc
+      then eval_with env t
+      else eval_with env f
+
+  | Fun (x, _arg_ty, body) ->
+      VClos { arg = x; body; env; name = None }
+
+  | App (e1, e2) ->
+      let vf = eval_with env e1 in
+      let va = eval_with env e2 in
+      (match vf with
+       | VClos clos ->
+           let env' = Env.add clos.arg va clos.env in
+           eval_with env' clos.body
+       | _ ->
+           failwith "internal error: attempting to apply non-function")
+
+  | Let { is_rec = _; name; ty = _annot_ty; binding; body } ->
+      (* At runtime, we treat let and let rec the same: evaluate the binding
+         once, then extend the environment. The type checker has already
+         enforced the additional constraints for let rec. *)
+      let v_binding = eval_with env binding in
+      let env' = Env.add name v_binding env in
+      eval_with env' body
+
+  | Assert e1 ->
+      let v = eval_with env e1 in
+      if bool_of_value v
+      then VUnit
+      else raise AssertFail
+
+  | Bop (op, e1, e2) ->
+      match op with
+      (* Short-circuit boolean operators. *)
+      | And ->
+          let v1 = eval_with env e1 in
+          (match v1 with
+           | VBool false -> VBool false
+           | VBool true ->
+               let v2 = eval_with env e2 in
+               VBool (bool_of_value v2)
+           | _ -> failwith "internal error: expected bool for &&")
+      | Or  ->
+          let v1 = eval_with env e1 in
+          (match v1 with
+           | VBool true -> VBool true
+           | VBool false ->
+               let v2 = eval_with env e2 in
+               VBool (bool_of_value v2)
+           | _ -> failwith "internal error: expected bool for ||")
+
+      (* Arithmetic on integers. *)
+      | Add | Sub | Mul | Div | Mod ->
+          let v1 = eval_with env e1 in
+          let v2 = eval_with env e2 in
+          let n1 = int_of_value v1 in
+          let n2 = int_of_value v2 in
+          (match op with
+           | Add -> VNum (n1 + n2)
+           | Sub -> VNum (n1 - n2)
+           | Mul -> VNum (n1 * n2)
+           | Div ->
+               if n2 = 0 then raise DivByZero else VNum (n1 / n2)
+           | Mod ->
+               if n2 = 0 then raise DivByZero else VNum (n1 mod n2)
+           | _ -> assert false)
+
+      (* Numeric comparisons. *)
+      | Lt | Lte | Gt | Gte ->
+          let v1 = eval_with env e1 in
+          let v2 = eval_with env e2 in
+          let n1 = int_of_value v1 in
+          let n2 = int_of_value v2 in
+          let b =
+            match op with
+            | Lt  -> n1 <  n2
+            | Lte -> n1 <= n2
+            | Gt  -> n1 >  n2
+            | Gte -> n1 >= n2
+            | _ -> assert false
+          in
+          VBool b
+
+      (* Equality / inequality: defined on base values (unit, bool, int). *)
+      | Eq | Neq ->
+          let v1 = eval_with env e1 in
+          let v2 = eval_with env e2 in
+          let equal =
+            match v1, v2 with
+            | VUnit, VUnit -> true
+            | VBool b1, VBool b2 -> b1 = b2
+            | VNum n1, VNum n2 -> n1 = n2
+            | _ ->
+                (* Other cases (e.g., functions) are not intended to occur
+                   in well-typed student programs. *)
+                failwith "internal error: equality on unsupported values"
+          in
+          VBool (if op = Eq then equal else not equal)
+
+(* Entry point used by the grader. *)
+let eval (e : expr) : value =
+  eval_with Env.empty e
+
+let interp (s : string) : (value, error) result =
+  match parse s with
+  | None -> Error ParseErr
+  | Some p ->
+      let e = desugar p in
+      match type_of e with
+      | Error e -> Error e
+      | Ok _ ->
+          (* On well-typed programs, evaluation should not raise any
+             of the static-error variants; DivByZero / AssertFail are
+             raised as OCaml exceptions instead, as required. *)
+          Ok (eval e)

@@ -2,7 +2,7 @@
 # OCAMLPARAM: unset
 # Shared cache: enabled-except-user-rules
 # Shared cache location: /Users/darren/.cache/dune/db
-# Workspace root: /Users/darren/Desktop/cs320-fall-2025-private/assigns/interp2
+# Workspace root: /Users/darren/Desktop/mini-project2
 # Auto-detected concurrency: 14
 # Dune context:
 #  { name = "default"
@@ -13,7 +13,7 @@
 #  ; build_dir = In_build_dir "default"
 #  ; instrument_with = []
 #  }
-$ /Users/darren/.opam/cs320-f25/bin/ocamlc.opt -config > /var/folders/xy/8xdjfzt90t1fh8dls1_hf6cw0000gn/T/dune_1b6902_output
+$ /Users/darren/.opam/cs320-f25/bin/ocamlc.opt -config > /var/folders/xy/8xdjfzt90t1fh8dls1_hf6cw0000gn/T/dune_4cb8ca_output
 $ (cd _build/default/test && ./test_interp2.exe)
 > ..
 > Ran: 2 tests in: 0.11 seconds.
